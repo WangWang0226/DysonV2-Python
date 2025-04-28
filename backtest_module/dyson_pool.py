@@ -1,6 +1,7 @@
 # dyson_pool.py
 import itertools, math
 from collections import defaultdict
+from time_utils import compute_due_time_and_duration, tm
 
 INIT_ETH = 10
 W_FACTOR = 1  # w = k * W_FACTOR
@@ -36,34 +37,28 @@ class DysonPool:
         self.notes: dict[int, Note] = {}
         self._seq = itertools.count()
 
-    # ---------- helper ----------
-    @staticmethod
-    def _sqrt(x):
-        return math.sqrt(max(x, 0.0))
-
-    @staticmethod
-    def _rebalance(x, y, price):
+    def rebalance(self, price):
         """50 / 50 資產再平衡"""
-        eth_val = x * price
-        total_val = eth_val + y
+        eth_val = self.x * price
+        total_val = eth_val + self.y
         target = total_val / 2
         if eth_val > target:
             diff = (eth_val - target) / price
-            return x - diff, y + (eth_val - target)
-        elif y > target:
-            diff = y - target
-            return x + diff / price, y - diff
-        return x, y
+            return self.x - diff, self.y + (eth_val - target)
+        elif self.y > target:
+            diff = self.y - target
+            return self.x + diff / price, self.y - diff
+        return self.x, self.y
 
-    # ---------- public API ----------
     def deposit(self, in0, in1, lock_days, today, price):
         assert in0 > 0 or in1 > 0
-        due = today + lock_days
 
-        k_before = self._sqrt(self.x * self.y)
-        k_after = self._sqrt((self.x + in0) * (self.y + in1))
+        due, duration_sec = compute_due_time_and_duration(lock_days)
+
+        k_before = math.sqrt(self.x * self.y)
+        k_after = math.sqrt((self.x + in0) * (self.y + in1))
         diff = k_after - k_before
-        Q_sq, Q = 4 * diff * diff, self._sqrt(4 * diff * diff)
+        Q_sq, Q = 4 * diff * diff, math.sqrt(4 * diff * diff)
 
         # note 份額
         if in0 * self.y > in1 * self.x:
@@ -79,7 +74,7 @@ class DysonPool:
         q_old, q_new = self.q_by_due[due], self.q_by_due[due] + Q
         a, b = q_old / self.w, q_new / self.w
         discount = (math.log2(b + 1) - math.log2(a + 1)) * math.log(2) / (b - a or 1)
-        prem_ratio = 0.4 * self.basis * math.sqrt(lock_days / 365) * discount
+        prem_ratio = 0.4 * self.basis * math.sqrt(duration_sec / (365 * 86400)) * discount
         note0 *= 1 + prem_ratio
         note1 *= 1 + prem_ratio
         self.q_by_due[due] = q_new
@@ -88,13 +83,14 @@ class DysonPool:
         self.x += in0
         self.y += in1
         self.k_last = k_after
-        self.x, self.y = self._rebalance(self.x, self.y, price)
+        self.x, self.y = self.rebalance(price)
 
         nid = next(self._seq)
         self.notes[nid] = Note(nid, note0, note1, due, today, in0, in1, price)
-        return nid, note0, note1, prem_ratio
+        return nid, note0, note1, prem_ratio, due, duration_sec, q_old, q_new
 
-    def withdraw_due(self, today, price):
+    def withdraw_due(self, utc_date, price):
+        today = utc_date.timestamp() / 86400
         """領回所有到期 Note"""
         paid = []
         for nid in list(self.notes):
@@ -121,8 +117,8 @@ class DysonPool:
 
                 self.x -= amt0
                 self.y -= amt1
-                self.k_last = self._sqrt(self.x * self.y)
-                self.x, self.y = self._rebalance(self.x, self.y, price)
+                self.k_last = math.sqrt(self.x * self.y)
+                self.x, self.y = self.rebalance(price)
 
                 paid.append((n, amt0, amt1))
                 del self.notes[nid]
@@ -134,5 +130,5 @@ class DysonPool:
             "price": price,
             "reserve_eth": self.x,
             "reserve_usdc": self.y,
-            "k": self._sqrt(self.x * self.y),
+            "k": math.sqrt(self.x * self.y),
         }

@@ -20,10 +20,6 @@ class Analyzer:
         # enrich deposits
         self.dep = self.dep.merge(self.snap[["day", "price"]], on="day")
         self.dep["invest_usd"] = self.dep.in0 * self.dep.price + self.dep.in1
-        self.dep["premium_usd"] = self.dep.invest_usd * self.dep.premium_ratio
-        self.dep["apr"] = (
-            self.dep.premium_usd / self.dep.invest_usd * 365 / self.dep.lock
-        )
         self.dep["side"] = ((self.dep.in0 == 0) | (self.dep.in1 == 0)).map(
             {True: "Single", False: "Dual"}
         )
@@ -51,30 +47,29 @@ class Analyzer:
         os.makedirs(odir, exist_ok=True)
         self._export_csv(odir)
 
-        # 1) 投資人數
-        self.dep.groupby("day").size().plot.bar(title=f"{self.tag}: #Investors / day")
-        self._save_show(f"{odir}/users.png")
-
-        # 2) 每日投入 & premium
         g = self.dep.groupby("day")
-        g.invest_usd.sum().plot(label="Invest $")
-        g.premium_usd.sum().plot(label="Premium $")
-        plt.legend()
-        plt.title(f"{self.tag}: Invest vs Premium")
-        self._save_show(f"{odir}/amt_prem.png")
 
-        # 3) premium / k
-        ratio = g.premium_usd.sum() / self._snap_idx.k
-        ratio.plot()
-        plt.title(f"{self.tag}: Premium / k")
-        self._save_show(f"{odir}/prem_k.png")
+        # 1) 投資人數
+        g.size().plot.bar(title=f"{self.tag}: #Investors / day")
+        self._save_show(f"{odir}/investors_amount.png")
+
+        # 2) 每日投入
+        g.invest_usd.sum().plot()
+        plt.legend()
+        plt.title(f"{self.tag}: Invest")
+        self._save_show(f"{odir}/invest_amount.png")
+
+        # 3) premium
+        g.premium_ratio.sum().plot()
+        plt.title(f"{self.tag}: Premium ratio")
+        self._save_show(f"{odir}/premium.png")
 
         # 4) k 走勢與日變動
         self._snap_idx.k.plot(title=f"{self.tag}: k value")
         self._save_show(f"{odir}/k_curve.png")
 
-        (self._snap_idx.k.pct_change() * 100).iloc[1:].plot.bar(
-            title=f"{self.tag}: Δk % per day"
+        (self._snap_idx.k.pct_change() * 100).iloc[1:].plot(
+            title=f"{self.tag}: Δk % per day", marker="o"
         )
         self._save_show(f"{odir}/k_change.png")
 
@@ -82,15 +77,10 @@ class Analyzer:
         self._snap_idx.price.plot(title=f"{self.tag}: ETH price (USD)")
         self._save_show(f"{odir}/price_curve.png")
 
-        (self._snap_idx.price.pct_change() * 100).iloc[1:].plot.bar(
-            title=f"{self.tag}: Δprice % per day"
+        (self._snap_idx.price.pct_change() * 100).iloc[1:].plot(
+            title=f"{self.tag}: Δprice % per day", marker="o"
         )
         self._save_show(f"{odir}/price_change.png")
-
-        # 6) APR 分布
-        sns.histplot(self.dep.apr, bins=30, kde=True)
-        plt.title(f"{self.tag}: APR")
-        self._save_show(f"{odir}/apr.png")
 
         # 7) Lock days 分布
         sns.histplot(self.dep.lock, bins=30)
