@@ -96,4 +96,8 @@ class Analyzer:
         if not self.wd.empty:
             sns.histplot(self.wd.pnl_usd, bins=30, kde=True)
             plt.title(f"{self.tag}: User PnL (USD)")
-            self._save_show(f"{odir}/pnl.png")
+            self._save_show(f"{odir}/pnl_usd.png")
+
+            sns.histplot(self.wd.pnl_ratio, bins=30, kde=True)
+            plt.title(f"{self.tag}: User PnL %")
+            self._save_show(f"{odir}/pnl_ratio.png")

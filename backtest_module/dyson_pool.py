@@ -2,28 +2,22 @@
 import itertools, math
 from collections import defaultdict
 from time_utils import compute_due_time_and_duration, tm
+from dataclasses import dataclass
 
 INIT_ETH = 10
 W_FACTOR = 1  # w = k * W_FACTOR
 
 
+@dataclass
 class Note:
-    __slots__ = (
-        "id",
-        "token0Amt",
-        "token1Amt",
-        "due",
-        "day_create",
-        "in0",
-        "in1",
-        "price_in",
-    )
-
-    def __init__(self, nid, t0, t1, due, day, in0, in1, p_in):
-        self.id = nid
-        self.token0Amt, self.token1Amt = t0, t1
-        self.due, self.day_create = due, day
-        self.in0, self.in1, self.price_in = in0, in1, p_in
+    id: int
+    token0Amt: float
+    token1Amt: float
+    due: float
+    day_create: float
+    in0: float
+    in1: float
+    price_in: float
 
 
 class DysonPool:
@@ -58,7 +52,8 @@ class DysonPool:
         k_before = math.sqrt(self.x * self.y)
         k_after = math.sqrt((self.x + in0) * (self.y + in1))
         diff = k_after - k_before
-        Q_sq, Q = 4 * diff * diff, math.sqrt(4 * diff * diff)
+        Q_sq = 4 * diff * diff
+        Q = math.sqrt(Q_sq)
 
         # note 份額
         if in0 * self.y > in1 * self.x:
