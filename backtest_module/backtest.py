@@ -2,30 +2,57 @@
 import random, itertools
 import pandas as pd
 from price_loader import load_eth_prices
-from dyson_pool import DysonPool, INIT_ETH
+from dyson_pool import DysonPool
 from time_utils import tm, random_time_in_day
 from datetime import datetime, timezone, time
 
-MIN_ETH = 0.01
-MAX_ETH = 0.5
-MIN_USDC = 50
-MAX_USDC = 2000
-MAX_USERS = 10
-SEED = 42
-random.seed(SEED)
-
 
 class BacktestRunner:
-    def __init__(self, days: int, basis=0.5):
-        self.days = days
+
+    def __init__(self, init_eth, main_days: int, basis=0.5, w_factor=1):
+        self.hp = {  # ←① 超參數集中放在一個 dict
+            "MIN_ETH": 0.01, # 單筆最小 ETH 存款
+            "MAX_ETH": 0.5, # 單筆最大 ETH 存款
+            "MIN_USDC": 50, # 單筆最小 USDC 存款
+            "MAX_USDC": 2000, # 單筆最大 USDC 存款
+            "MAX_USERS": 10, # 單日最大存款人數
+            "BASIS": basis,
+            "W_FACTOR": w_factor,
+            "SEED": 42,
+        }
+        random.seed(self.hp["SEED"])
+
+        """
+        main_days : 真正要評估的存款期間
+        cool_down : 只允許 withdraw 的天數
+        """
+        self.main_days = main_days
+        self.cool_down = 30
+        total_days = main_days + self.cool_down  # 多抓 30 天價格
+
         self.prices_df = (
-            load_eth_prices(days).drop_duplicates("date").reset_index(drop=True)
+            load_eth_prices(total_days).drop_duplicates("date").reset_index(drop=True)
         )
         first_price = self.prices_df.price_usd.iloc[0]
-        self.pool = DysonPool(INIT_ETH, INIT_ETH * first_price, basis)
+        self.INIT_ETH = init_eth
+        self.INIT_USDC = init_eth * first_price
+        self.pool = DysonPool(init_eth, self.INIT_USDC, basis, w_factor)
         self.deposits, self.withdraws, self.daily = [], [], []
 
-    def _simulate_day(self, day_idx, price, utc_date: datetime):
+    def get_info(self) -> dict:
+        return {
+            # 回測區間
+            "start_date"       : self.prices_df.date.iloc[0],
+            "deposit_end_date" : self.prices_df.date.iloc[-self.cool_down],
+            "total_end_date"   : self.prices_df.date.iloc[-1],
+            # 池子初始值
+            "init_eth"  : self.INIT_ETH,
+            "init_usdc" : self.INIT_USDC,
+            # 超參數
+            **self.hp,                       
+        }
+
+    def _simulate_day(self, day_idx, price, utc_date: datetime, allow_deposit: bool):
 
         # 1. withdraw
         for note, amt0, amt1 in self.pool.withdraw_due(utc_date, price):
@@ -43,16 +70,19 @@ class BacktestRunner:
                 }
             )
         # 2. deposits
-        n_users = random.randint(1, MAX_USERS)
+        if not allow_deposit:
+            return
+
+        n_users = random.randint(1, self.hp["MAX_USERS"])
         for _ in range(n_users):
             single = random.choice([True, False])
             if single:
                 if random.random() < 0.5:
-                    in0, in1 = round(random.uniform(MIN_ETH, MAX_ETH), 4), 0
+                    in0, in1 = round(random.uniform(self.hp["MIN_ETH"], self.hp["MAX_ETH"]), 4), 0
                 else:
                     in0, in1 = 0, round(random.uniform(50, 2000), 2)
             else:
-                in0 = round(random.uniform(MIN_ETH, MAX_ETH), 4)
+                in0 = round(random.uniform(self.hp["MIN_ETH"], self.hp["MAX_ETH"]), 4)
                 in1 = round(in0 * price, 2)
             lock = random.randint(1, 30)
             tm.setCurrentTime(random_time_in_day(utc_date))
@@ -84,7 +114,8 @@ class BacktestRunner:
         for d, (row_idx, row) in enumerate(self.prices_df.iterrows(), start=1):
             price = row.price_usd
             utc_date = datetime.combine(row.date, time.min, tzinfo=timezone.utc)
-            self._simulate_day(d, price, utc_date)
+            allow_deposit = d <= self.main_days
+            self._simulate_day(d, price, utc_date, allow_deposit)
             self.daily.append(self.pool.snapshot(d, price))
         return (
             pd.DataFrame(self.deposits),
@@ -94,5 +125,5 @@ class BacktestRunner:
 
     def get_start_end_dates(self):
         start_date = self.prices_df.date.iloc[0]
-        end_date = self.prices_df.date.iloc[-1]
+        end_date = self.prices_df.date.iloc[-self.cool_down]
         return start_date, end_date

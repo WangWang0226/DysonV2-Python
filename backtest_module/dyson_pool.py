@@ -4,10 +4,6 @@ from collections import defaultdict
 from time_utils import compute_due_time_and_duration, tm
 from dataclasses import dataclass
 
-INIT_ETH = 10
-W_FACTOR = 1  # w = k * W_FACTOR
-
-
 @dataclass
 class Note:
     id: int
@@ -21,10 +17,10 @@ class Note:
 
 
 class DysonPool:
-    def __init__(self, init_eth: float, init_usdc: float, basis: float):
+    def __init__(self, init_eth: float, init_usdc: float, basis: float, w_factor):
         self.x, self.y = init_eth, init_usdc
         self.k_last = math.sqrt(self.x * self.y)
-        self.w = self.k_last * W_FACTOR
+        self.w = self.k_last * w_factor
         self.basis = basis
 
         self.q_by_due: defaultdict[int, float] = defaultdict(float)
