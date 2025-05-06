@@ -9,7 +9,7 @@ from datetime import datetime, timezone, time
 
 class BacktestRunner:
 
-    def __init__(self, init_eth, main_days: int, basis=0.5, w_factor=1):
+    def __init__(self, init_eth, main_days: int, basis=0.5, w_factor=1, scale: int = 1):
         self.hp = {  # ←① 超參數集中放在一個 dict
             "MIN_ETH": 0.01, # 單筆最小 ETH 存款
             "MAX_ETH": 0.5, # 單筆最大 ETH 存款
@@ -18,9 +18,15 @@ class BacktestRunner:
             "MAX_USERS": 10, # 單日最大存款人數
             "BASIS": basis,
             "W_FACTOR": w_factor,
+            "SCALE": scale,
             "SEED": 42,
         }
         random.seed(self.hp["SEED"])
+
+        """
+        scale = x ：平均金額 ÷ x，筆數 × x
+        """
+        self.scale = max(1, int(scale))
 
         """
         main_days : 真正要評估的存款期間
@@ -73,17 +79,33 @@ class BacktestRunner:
         if not allow_deposit:
             return
 
-        n_users = random.randint(1, self.hp["MAX_USERS"])
+        n_users = random.randint(1, self.hp["MAX_USERS"]) * self.scale
         for _ in range(n_users):
             single = random.choice([True, False])
             if single:
                 if random.random() < 0.5:
-                    in0, in1 = round(random.uniform(self.hp["MIN_ETH"], self.hp["MAX_ETH"]), 4), 0
+                    in0, in1 = (
+                        round(
+                            random.uniform(self.hp["MIN_ETH"], self.hp["MAX_ETH"])
+                            / self.scale,
+                            4,
+                        ),
+                        0,
+                    )
                 else:
-                    in0, in1 = 0, round(random.uniform(50, 2000), 2)
+                    in0, in1 = 0, round(
+                        random.uniform(self.hp["MIN_USDC"], self.hp["MAX_USDC"]) / self.scale, 2
+                    )
             else:
-                in0 = round(random.uniform(self.hp["MIN_ETH"], self.hp["MAX_ETH"]), 4)
+                in0 = round(
+                    random.uniform(self.hp["MIN_ETH"], self.hp["MAX_ETH"]) / self.scale,
+                    4,
+                )
                 in1 = round(in0 * price, 2)
+
+            if in0 == 0 and in1 == 0:  # 避免極小數被 round 成 0
+                continue
+            
             lock = random.randint(1, 30)
             tm.setCurrentTime(random_time_in_day(utc_date))
             nid, n0, n1, premium, due, duration_sec, q_old, q_new = self.pool.deposit(

@@ -1,125 +1,243 @@
-# compare.py
-import os, pandas as pd, matplotlib.pyplot as plt, seaborn as sns
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from typing import Dict, List, Tuple, Optional
+
+# Configuration
+PLOT_CONFIG = {
+    "figsize": (10, 6),
+    "dpi": 120,
+    "barplot_rotation": 25,
+    "facet_cols": 3,
+    "facet_figsize": (5, 3.2),
+    "bins": 30,
+    "linewidth": 1.5,
+    "font_size": {"title": 14, "subtitle": 9},
+}
 
 sns.set_style("whitegrid")
-plt.rcParams["figure.figsize"] = (10, 6)
+plt.rcParams["figure.figsize"] = PLOT_CONFIG["figsize"]
 
 
-def _plot_k_absolute(k_curves, out_dir):
-    """原本的絕對值折線（可保留）"""
-    plt.figure(figsize=(11, 5))
-    for tag, ser in k_curves:
-        ser.plot(label=tag, linewidth=1.5)
-    plt.legend()
-    plt.xlabel("day")
-    plt.ylabel("k value")
-    plt.title("k value – all scenarios (absolute)")
-    plt.tight_layout()
-    plt.savefig(f"{out_dir}/k_curve_abs.png", dpi=120)
-    plt.show()
+class ScenarioComparer:
+    """Compare multiple backtest scenarios and generate visualizations."""
 
+    def __init__(
+        self,
+        results: Dict[
+            Tuple[int, float, float],
+            Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict],
+        ],
+        out_dir: str = "results/_compare",
+    ):
+        """Initialize with results dictionary and output directory."""
+        if not results:
+            raise ValueError("Results dictionary cannot be empty")
+        self.results = results
+        self.out_dir = out_dir
+        os.makedirs(out_dir, exist_ok=True)
+        self.summary = None
+        self.k_curves = []
+        self.pnls = []
+        self.pnl_ratios = []
 
-def _plot_k_pct(k_curves, out_dir):
-    """把每條線轉為%變化後再畫（重點：線疊在一起比較清楚）"""
-    plt.figure(figsize=(11, 5))
-    for tag, ser in k_curves:
-        ((ser / ser.iloc[0] - 1) * 100).plot(label=tag, linewidth=1.5)
-    plt.legend()
-    plt.xlabel("day")
-    plt.ylabel("Δk  (%)")
-    plt.title("k value – relative change (%)")
-    plt.axhline(0, color="gray", lw=1)
-    plt.tight_layout()
-    plt.savefig(f"{out_dir}/k_curve_pct.png", dpi=120)
-    plt.show()
+    def _process_data(self) -> None:
+        """Process results to generate summary, k curves, and PnL data."""
+        rows = []
+        for (horizon, init_eth, scale), (dep, wd, snap, info) in self.results.items():
+            tag = f"{horizon}d-{init_eth}ETH-{scale}x"
 
+            # Process k data
+            k_series = snap.set_index("day")["k"]
+            init_k, final_k = k_series.iloc[0], k_series.iloc[-1]
+            k_change_pct = (final_k - init_k) / init_k * 100
 
-def _facet_k(k_curves, out_dir):
-    """每個 scenario 一張小圖，自動 y-axis → 看絕對值也能看到波動"""
-    n = len(k_curves)
-    cols = 3
-    rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(
-        rows, cols, figsize=(5 * cols, 3 * rows), sharex=False, sharey=False
-    )
-    axes = axes.flatten()
-    for ax, (tag, ser) in zip(axes, k_curves):
-        ser.plot(ax=ax, linewidth=1.4)
-        ax.set_title(tag)
-        ax.set_xlabel("day")
-        ax.set_ylabel("k")
-    # 清掉沒用到的子圖
-    for ax in axes[len(k_curves) :]:
-        ax.remove()
-    plt.suptitle(
-        "k value – each scenario (absolute, individual scale)", y=1.02, fontsize=14
-    )
-    plt.tight_layout()
-    plt.savefig(f"{out_dir}/k_curve_facet.png", dpi=120)
-    plt.show()
+            # Process PnL data
+            tot_pnl = wd["pnl_usd"].sum() if not wd.empty else 0
+            avg_pnl = wd["pnl_usd"].mean() if not wd.empty else 0
 
-
-def compare_runs(results: dict, out_dir="results/_compare"):
-    """
-    results  : dict  {(horizon, init_eth): (dep_df, wd_df, snap_df, info_dict)}
-    out_dir  : 資料輸出根目錄
-    -------------------------------------------------------------
-
-    """
-    os.makedirs(out_dir, exist_ok=True)
-
-    rows, k_curves = [], []
-    for (h, ie), (dep, wd, snap, info) in results.items():
-
-        tag = f"{h}d-{ie}ETH"
-        # -------- k 相關 --------
-        k_series = snap.set_index("day").k
-        init_k, final_k = k_series.iloc[0], k_series.iloc[-1]
-        k_change_pct = (final_k - init_k) / init_k * 100
-
-        # 儲存曲線 (之後畫疊圖)
-        k_curves.append((tag, k_series))
-
-        # -------- PnL 相關 --------
-        tot_pnl = wd.pnl_usd.sum() if not wd.empty else 0
-        avg_pnl = wd.pnl_usd.mean() if not wd.empty else 0
-
-        rows.append(
-            dict(
-                scenario=tag,
-                horizon=h,
-                init_eth=ie,
-                k_init=init_k,
-                k_final=final_k,
-                k_change_pct=k_change_pct,
-                pnl_total_usd=tot_pnl,
-                pnl_avg_usd=avg_pnl,
+            # Store data
+            self.k_curves.append((tag, k_series))
+            self.pnls.append((tag, wd["pnl_usd"]))
+            self.pnl_ratios.append((tag, wd["pnl_ratio"]))
+            rows.append(
+                {
+                    "scenario": tag,
+                    "horizon": horizon,
+                    "init_eth": init_eth,
+                    "k_init": init_k,
+                    "k_final": final_k,
+                    "k_change_pct": k_change_pct,
+                    "pnl_total_usd": tot_pnl,
+                    "pnl_avg_usd": avg_pnl,
+                    "scale": scale,
+                }
             )
+
+        self.summary = pd.DataFrame(rows).sort_values(["horizon", "init_eth"])
+
+    def _clean_unused_axes(self, axes: List, n_plots: int) -> None:
+        """Remove unused subplot axes."""
+        for ax in axes[n_plots:]:
+            ax.remove()
+
+    def _save_plot(self, filename: str) -> None:
+        """Save and display plot with error handling."""
+        try:
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(self.out_dir, filename),
+                dpi=PLOT_CONFIG["dpi"],
+                bbox_inches="tight",
+            )
+            plt.show()
+        except Exception as e:
+            print(f"Failed to save {filename}: {e}")
+        finally:
+            plt.close()
+
+    def _plot_summary_bar(
+        self, column: str, ylabel: str, title: str, filename: str
+    ) -> None:
+        """Plot bar chart for summary metrics."""
+        plt.figure()
+        sns.barplot(data=self.summary, x="scenario", y=column)
+        plt.xticks(rotation=PLOT_CONFIG["barplot_rotation"])
+        plt.ylabel(ylabel)
+        plt.title(title)
+        self._save_plot(filename)
+
+    def _plot_k_curves(self) -> None:
+        """Plot k curves (absolute and percentage change)."""
+        # Absolute k curves
+        plt.figure()
+        for tag, ser in self.k_curves:
+            ser.plot(label=tag, linewidth=PLOT_CONFIG["linewidth"])
+        plt.legend()
+        plt.xlabel("day")
+        plt.ylabel("k value")
+        plt.title("k value – all scenarios (absolute)")
+        self._save_plot("k_curve_abs.png")
+
+        # Percentage change k curves
+        plt.figure()
+        for tag, ser in self.k_curves:
+            ((ser / ser.iloc[0] - 1) * 100).plot(
+                label=tag, linewidth=PLOT_CONFIG["linewidth"]
+            )
+        plt.legend()
+        plt.xlabel("day")
+        plt.ylabel("Δk (%)")
+        plt.title("k value – relative change (%)")
+        plt.axhline(0, color="gray", lw=1)
+        self._save_plot("k_curve_pct.png")
+
+    def _plot_facet_k(self) -> None:
+        """Plot faceted k curves with individual scales."""
+        n = len(self.k_curves)
+        cols = PLOT_CONFIG["facet_cols"]
+        rows = (n + cols - 1) // cols
+        fig, axes = plt.subplots(
+            rows,
+            cols,
+            figsize=(
+                PLOT_CONFIG["facet_figsize"][0] * cols,
+                PLOT_CONFIG["facet_figsize"][1] * rows,
+            ),
+        )
+        axes = axes.flatten()
+
+        for ax, (tag, ser) in zip(axes, self.k_curves):
+            ser.plot(ax=ax, linewidth=PLOT_CONFIG["linewidth"])
+            ax.set_title(tag, fontsize=PLOT_CONFIG["font_size"]["subtitle"])
+            ax.set_xlabel("day")
+            ax.set_ylabel("k")
+
+        self._clean_unused_axes(axes, n)
+        plt.suptitle(
+            "k value – each scenario (absolute, individual scale)",
+            y=1.02,
+            fontsize=PLOT_CONFIG["font_size"]["title"],
+        )
+        self._save_plot("k_curve_facet.png")
+
+    def _plot_facet_hist(
+        self, data: List[Tuple[str, pd.Series]], column: str, title: str, filename: str
+    ) -> None:
+        """Plot faceted histograms for PnL or PnL ratio."""
+        n = len(data)
+        if n == 0:
+            return
+
+        cols = PLOT_CONFIG["facet_cols"]
+        rows = (n + cols - 1) // cols
+        fig, axes = plt.subplots(
+            rows,
+            cols,
+            figsize=(
+                PLOT_CONFIG["facet_figsize"][0] * cols,
+                PLOT_CONFIG["facet_figsize"][1] * rows,
+            ),
+        )
+        axes = axes.flatten()
+
+        for ax, (tag, ser) in zip(axes, data):
+            if ser.empty:
+                ax.set_visible(False)
+                continue
+            sns.histplot(ser, bins=PLOT_CONFIG["bins"], kde=True, ax=ax)
+            ax.set_title(tag, fontsize=PLOT_CONFIG["font_size"]["subtitle"])
+            ax.set_xlabel(column)
+            ax.set_ylabel("Count")
+
+        self._clean_unused_axes(axes, n)
+        plt.suptitle(title, y=1.02, fontsize=PLOT_CONFIG["font_size"]["title"])
+        self._save_plot(filename)
+
+    def compare(self) -> None:
+        """Generate all comparisons and save results."""
+        self._process_data()
+        self.summary.to_csv(os.path.join(self.out_dir, "summary.csv"), index=False)
+
+        # Summary bar plots
+        self._plot_summary_bar(
+            "k_change_pct", "Δk (%)", "k change (%)", "k_change_pct.png"
+        )
+        self._plot_summary_bar(
+            "pnl_total_usd", "Total PnL (USD)", "Total user PnL", "pnl_total.png"
+        )
+        self._plot_summary_bar(
+            "pnl_avg_usd", "Avg PnL (USD)", "Average user PnL", "pnl_avg.png"
         )
 
-    summary = pd.DataFrame(rows).sort_values(["horizon", "init_eth"])
-    summary.to_csv(f"{out_dir}/summary.csv", index=False)
+        # k curve plots
+        self._plot_k_curves()
+        self._plot_facet_k()
 
-    # ---------- 圖表 ----------
-    # (1) k 曲線圖
-    _plot_k_absolute(k_curves, out_dir)  # 原圖 (可選)
-    _plot_k_pct(k_curves, out_dir)  # 相對變化 (%)
-    _facet_k(k_curves, out_dir)  # 分面小圖
+        # PnL histograms
+        self._plot_facet_hist(
+            self.pnls,
+            "User PnL (USD)",
+            "User PnL distribution – different scales",
+            "pnl_hist_facet.png",
+        )
+        self._plot_facet_hist(
+            self.pnl_ratios,
+            "User PnL (Ratio)",
+            "User PnL ratio distribution – different scales",
+            "pnl_ratio_hist_facet.png",
+        )
 
-    # (3) Total PnL
-    sns.barplot(data=summary, x="scenario", y="pnl_total_usd")
-    plt.xticks(rotation=25)
-    plt.ylabel("Total PnL  (USD)")
-    plt.title("Total user PnL")
-    plt.savefig(f"{out_dir}/pnl_total.png", dpi=110)
-    plt.show()
+        print(f"[compare] ✅ saved to {self.out_dir}")
 
-    # (4) Average PnL
-    sns.barplot(data=summary, x="scenario", y="pnl_avg_usd")
-    plt.xticks(rotation=25)
-    plt.ylabel("Avg PnL  (USD)")
-    plt.title("Average user PnL")
-    plt.savefig(f"{out_dir}/pnl_avg.png", dpi=110)
-    plt.show()
 
-    print(f"[compare] ✅  saved to {out_dir}")
+def compare_runs(
+    results: Dict[
+        Tuple[int, float, float], Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]
+    ],
+    out_dir: str = "results/_compare",
+) -> None:
+    """Wrapper function to maintain compatibility with existing code."""
+    comparer = ScenarioComparer(results, out_dir)
+    comparer.compare()
