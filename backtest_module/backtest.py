@@ -108,7 +108,7 @@ class BacktestRunner:
             
             lock = random.randint(1, 30)
             tm.setCurrentTime(random_time_in_day(utc_date))
-            nid, n0, n1, premium, due, duration_sec, q_old, q_new = self.pool.deposit(
+            nid, note0, note1, note0_with_prem, note1_with_prem, premium, due, duration_sec, q_old, q_new = self.pool.deposit(
                 in0, in1, lock, day_idx, price
             )
             self.deposits.append(
@@ -122,8 +122,10 @@ class BacktestRunner:
                     "price_in": price,
                     "in0": in0,
                     "in1": in1,
-                    "note0": n0,
-                    "note1": n1,
+                    "note0": note0,
+                    "note1": note1,
+                    "note0(+Premium)": note0_with_prem,
+                    "note1(+Premium)": note1_with_prem,
                     "premium_ratio": premium,
                     "q_old": q_old,
                     "q_new": q_new,

@@ -77,7 +77,7 @@ class DysonPool:
         return note0, note1
 
     def _calculate_reverse_notes(self, in0: float, in1: float) -> tuple[float, float]:
-        """Calculate note0 and note1 for reverse deposit"""
+        """in0 and in1 must be one of them is zero for reverse deposit"""
         if in0 == 0:
             note1 = in1
             note0 = self.virtual_swap(in1, is_input_0=False)
@@ -125,20 +125,20 @@ class DysonPool:
         prem_ratio = (
             0.4 * self.basis * math.sqrt(duration_sec / (365 * 86400)) * discount
         )
-        note0 *= 1 + prem_ratio
-        note1 *= 1 + prem_ratio
+        note0_with_prem = note0 * (1 + prem_ratio)
+        note1_with_prem = note1 * (1 + prem_ratio)
         self.q_by_due[due] = q_new
 
         nid = next(self._seq)
         self.notes[nid] = Note(
-            nid, note0, note1, due, today, in0, in1, price, option_type
+            nid, note0_with_prem, note1_with_prem, due, today, in0, in1, price, option_type
         )
-        return nid, note0, note1, prem_ratio, due, duration_sec, q_old, q_new, k_after
+        return nid, note0, note1, note0_with_prem, note1_with_prem, prem_ratio, due, duration_sec, q_old, q_new, k_after
 
     def deposit(
         self, in0: float, in1: float, lock_days: int, today: float, price: float
     ) -> tuple:
-        nid, note0, note1, prem_ratio, due, duration_sec, q_old, q_new, k_after = (
+        nid, note0, note1, note0_with_prem, note1_with_prem, prem_ratio, due, duration_sec, q_old, q_new, k_after = (
             self._process_deposit(
                 in0, in1, lock_days, today, price, deposit_type=DepositType.FORWARD
             )
@@ -149,7 +149,7 @@ class DysonPool:
         self.k_last = k_after
         self.x, self.y = self.rebalance(price)
 
-        return nid, note0, note1, prem_ratio, due, duration_sec, q_old, q_new
+        return nid, note0, note1, note0_with_prem, note1_with_prem, prem_ratio, due, duration_sec, q_old, q_new
 
     def withdraw_due(self, utc_date, price: float) -> list:
         today = utc_date.timestamp() / 86400
@@ -192,9 +192,13 @@ class DysonPool:
         price: float,
     ) -> tuple:
         assert option_type in ["call", "put"]
-        assert in0 == 0 or in1 == 0
-
-        nid, note0, note1, prem_ratio, due, duration_sec, q_old, q_new, k_after = (
+        
+        if option_type == "put":
+            assert in1 == 0, "For put options, in1 must be zero"
+        elif option_type == "call":
+            assert in0 == 0, "For call options, in0 must be zero"
+            
+        nid, note0, note1, note0_with_prem, note1_with_prem, prem_ratio, due, duration_sec, q_old, q_new, k_after = (
             self._process_deposit(
                 in0,
                 in1,
@@ -206,21 +210,22 @@ class DysonPool:
             )
         )
 
-        if option_type == "call":
-            swap_amount = in0 * price + in1
-            if self.x < note0 or self.y < swap_amount:
+        # The swap_amount
+        if option_type == "put":
+            swap_amount = note1
+            if self.y < swap_amount:
                 raise ValueError("Insufficient pool reserves")
-            self.x += note0
+            self.x += note0_with_prem
             self.y -= swap_amount
-        elif option_type == "put":
-            swap_amount = in1 / price + in0
-            if self.y < note1 or self.x < swap_amount:
+        elif option_type == "call":
+            swap_amount = note0
+            if self.x < swap_amount:
                 raise ValueError("Insufficient pool reserves")
             self.x -= swap_amount
-            self.y += note1
+            self.y += note1_with_prem
 
         self.k_last = math.sqrt(self.x * self.y)
-        return nid, note0, note1, prem_ratio, due, duration_sec, q_old, q_new
+        return nid, note0, note1, note0_with_prem, note1_with_prem, prem_ratio, due, duration_sec, q_old, q_new
 
     def exercise_option(self, nid: int, utc_date, price: float):
         today = utc_date.timestamp() / 86400
@@ -228,12 +233,12 @@ class DysonPool:
         if not n or n.option_type not in ["call", "put"] or n.due <= today:
             raise ValueError("Invalid note, not a reverse option, or already expired")
 
-        if n.option_type == "call":
+        if n.option_type == "put":
             if self.y < n.token1Amt or self.x < n.token0Amt:
                 raise ValueError("Insufficient pool reserves")
             self.y += n.token1Amt
             self.x -= n.token0Amt
-        elif n.option_type == "put":
+        elif n.option_type == "call":
             if self.x < n.token0Amt or self.y < n.token1Amt:
                 raise ValueError("Insufficient pool reserves")
             self.x += n.token0Amt
