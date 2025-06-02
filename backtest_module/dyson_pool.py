@@ -106,7 +106,7 @@ class DysonPool:
         k_after = math.sqrt((self.x + in0) * (self.y + in1))
         diff = k_after - k_before
         Q_sq = 4 * diff * diff
-        Q = math.sqrt(Q_sq)
+        q_add = math.sqrt(Q_sq) / 2
 
         # Delegate note calculation based on deposit type
         if deposit_type == DepositType.FORWARD:
@@ -118,7 +118,8 @@ class DysonPool:
 
         # Adjust q_by_due based on deposit type
         q_adjustment = 1.0 if deposit_type == DepositType.FORWARD else -1.0
-        q_old, q_new = self.q_by_due[due], self.q_by_due[due] + q_adjustment * Q
+        q_old = self.q_by_due[due]
+        q_new = q_old + q_adjustment * q_add
         a, b = q_old / self.w, q_new / self.w
 
         discount = self._calculate_discount(a, b, deposit_type)
