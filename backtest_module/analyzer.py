@@ -146,8 +146,19 @@ class Analyzer:
         self._save_show(f"{out_dir}/k_curve.png")
 
         # ETH 價格走勢與日變動
-        self._snap_idx.price.plot(title=f"{self.tag}: ETH price (USD)")
-        self._save_show(f"{out_dir}/price_curve.png")
+        fig, ax = plt.subplots()
+
+        # 市場價格（ETH 現貨價格）
+        self._snap_idx["price"].plot(ax=ax, label="Market ETH Price", linewidth=2)
+        # 池內 ETH 價格
+        self._snap_idx["pool_eth_price"].plot(ax=ax, label="Pool ETH Price", linestyle="--")
+
+        ax.set_title(f"{self.tag}: ETH Price vs Pool ETH Price")
+        ax.set_ylabel("Price (USD)")
+        ax.set_xlabel("Day")
+        ax.legend()
+        ax.grid(True)
+        self._save_show(f"{out_dir}/eth_vs_pool_price_curve.png")
 
         # 正向雙幣 vs 反向雙幣筆數
         counts = [len(self.dep), len(self.reverse_dep)]
