@@ -166,8 +166,8 @@ class DysonPool:
             option_type,
             swap_in,
             swap_out,
-        )  # is_swap_in_token1, swap_in, swap_out
-
+        )  
+        
     def snapshot(self, day: float, price: float) -> dict:
         return {
             "day": day,

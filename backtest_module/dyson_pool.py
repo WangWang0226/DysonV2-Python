@@ -1,21 +1,24 @@
-import itertools, math
-from collections import defaultdict
-from time_utils import compute_due_time_and_duration, tm
+import itertools
+import math
 from dataclasses import dataclass
+from collections import defaultdict
 from enum import Enum
-
+from time_utils import compute_due_time_and_duration
 
 @dataclass
-class Note:
+class Note_forward:
     id: int
-    token0Amt: float
-    token1Amt: float
+    note0_with_premium: float  # Note token0 amount
+    note1_with_premium: float  # Note token1 amount
     due: float
-    day_create: float
-    in0: float
-    in1: float
-    price_in: float
-    option_type: str = None  # "call" or "put" for reverse deposits
+
+@dataclass
+class Note_reverse:
+    id: int
+    m: float  # Target token0 amount
+    n: float  # Target token1 amount
+    strike: float  # Strike price
+    due: float
 
 
 class DepositType(Enum):
@@ -33,38 +36,43 @@ class DysonPool:
         self.w = self.k_last * w_factor
         self.basis = basis
         self.q_by_due = defaultdict(float)
-        self.notes = {}
+        self.notes_forward = {}
+        self.notes_reverse = {}
         self._seq = itertools.count()
 
     def rebalance(self, price: float) -> tuple[float, float]:
-        """Rebalance pool to 50/50 asset ratio based on current price"""
+        """Rebalance pool to 50/50 asset ratio based on current price, and update internal state."""
         eth_val = self.x * price
         total_val = eth_val + self.y
         target = total_val / 2
+
         if eth_val > target:
             diff = (eth_val - target) / price
-            return self.x - diff, self.y + (eth_val - target)
+            self.x -= diff
+            self.y += eth_val - target
         elif self.y > target:
             diff = self.y - target
-            return self.x + diff / price, self.y - diff
-        return self.x, self.y
-
+            self.x += diff / price
+            self.y -= diff
+        # 若已經是 50/50 就不變
+        return self.x, self.y  
+    
     def _calculate_discount(
         self, a: float, b: float, deposit_type: DepositType
     ) -> float:
         """Calculate discount factor based on deposit type"""
         if deposit_type == DepositType.FORWARD:
-            return (
-                (math.log2(b + 1) - math.log2(a + 1)) * math.log(2) / (b - a or 1e-10)
-            )
+            adjustment = 1
         elif deposit_type == DepositType.REVERSE:
-            return (
-                (math.log2(b + 0.5) - math.log2(a + 0.5))
-                * math.log(2)
-                / (b - a or 1e-10)
+            adjustment = 0.5
+
+        return (
+                (math.log2(b + adjustment) - math.log2(a + adjustment)) * math.log(2) / (b - a or 1e-10)
             )
 
-    def _calculate_forward_notes(self, in0: float, in1: float, Q_sq: float) -> tuple[float, float]:
+    def _calculate_forward_notes(
+        self, in0: float, in1: float, Q_sq: float
+    ) -> tuple[float, float]:
         """Calculate note0 and note1 based on pool reserves and input"""
         if in0 * self.y > in1 * self.x:
             ratio = (in1 * self.x) / self.y if self.y else 0
@@ -76,30 +84,19 @@ class DysonPool:
             note0 = Q_sq / note1
         return note0, note1
 
-    def _calculate_reverse_notes(self, in0: float, in1: float) -> tuple[float, float]:
-        """in0 and in1 must be one of them is zero for reverse deposit"""
-        if in0 == 0:
-            note1 = in1
-            note0 = self.virtual_swap(in1, is_input_0=False)
-        elif in1 == 0:
-            note0 = in0
-            note1 = self.virtual_swap(in0, is_input_0=True)
-        else:
-            raise ValueError("Reverse deposit must have only one input (in0 or in1)")
-        return note0, note1
-
-    def _process_deposit(
-        self,
-        in0: float,
-        in1: float,
-        lock_days: int,
-        today: float,
-        price: float,
-        deposit_type: DepositType,
-        option_type: str = None,
+    def _calculate_reverse_deposit(
+        self, m: float, n: float, premium: float
     ) -> tuple:
-        """Common deposit logic for both forward and reverse deposits"""
-        assert in0 > 0 or in1 > 0
+        """Calculate strike, delta_x, delta_y, and revert options for reverse deposit"""
+        strike = (self.y + n) / (self.x + m)
+        delta_x = m * (1 + premium) - n / strike
+        delta_y = n * (1 + premium) - m * strike
+        # Revert options
+        return strike, delta_x, delta_y
+
+    def deposit(self, in0: float, in1: float, lock_days: int, price: float) -> tuple:
+        """Handle forward dual deposit"""
+        assert in0 > 0 or in1 > 0, "At least one input must be positive"
         due, duration_sec = compute_due_time_and_duration(lock_days)
 
         k_before = math.sqrt(self.x * self.y)
@@ -108,21 +105,12 @@ class DysonPool:
         Q_sq = 4 * diff * diff
         q_add = math.sqrt(Q_sq) / 2
 
-        # Delegate note calculation based on deposit type
-        if deposit_type == DepositType.FORWARD:
-            note0, note1 = self._calculate_forward_notes(in0, in1, Q_sq)
-        elif deposit_type == DepositType.REVERSE:
-            note0, note1 = self._calculate_reverse_notes(in0, in1)
-        else:
-            raise ValueError("Invalid deposit type")
-
-        # Adjust q_by_due based on deposit type
-        q_adjustment = 1.0 if deposit_type == DepositType.FORWARD else -1.0
+        note0, note1 = self._calculate_forward_notes(in0, in1, Q_sq)
         q_old = self.q_by_due[due]
-        q_new = q_old + q_adjustment * q_add
+        q_new = q_old + q_add
         a, b = q_old / self.w, q_new / self.w
 
-        discount = self._calculate_discount(a, b, deposit_type)
+        discount = self._calculate_discount(a, b, DepositType.FORWARD)
         prem_ratio = (
             0.4 * self.basis * math.sqrt(duration_sec / (365 * 86400)) * discount
         )
@@ -131,122 +119,118 @@ class DysonPool:
         self.q_by_due[due] = q_new
 
         nid = next(self._seq)
-        self.notes[nid] = Note(
-            nid, note0_with_prem, note1_with_prem, due, today, in0, in1, price, option_type
-        )
-        return nid, note0, note1, note0_with_prem, note1_with_prem, prem_ratio, due, duration_sec, q_old, q_new, k_after
-
-    def deposit(
-        self, in0: float, in1: float, lock_days: int, today: float, price: float
-    ) -> tuple:
-        nid, note0, note1, note0_with_prem, note1_with_prem, prem_ratio, due, duration_sec, q_old, q_new, k_after = (
-            self._process_deposit(
-                in0, in1, lock_days, today, price, deposit_type=DepositType.FORWARD
-            )
-        )
+        self.notes_forward[nid] = Note_forward(nid, note0_with_prem, note1_with_prem, due)
 
         self.x += in0
         self.y += in1
         self.k_last = k_after
-        self.x, self.y = self.rebalance(price)
-
         return nid, note0, note1, note0_with_prem, note1_with_prem, prem_ratio, due, duration_sec, q_old, q_new
 
-    def withdraw_due(self, utc_date, price: float) -> list:
+    def withdraw_due(self, utc_date, price: float, nid: int) -> list:
         today = utc_date.timestamp() / 86400
-        paid = []
-        for nid in list(self.notes):
-            n = self.notes[nid]
-            if n.due <= today:
-                num = (
-                    self.x * n.token1Amt
-                    + n.token0Amt * n.token1Amt
-                    - self.y * n.token0Amt
-                )
-                ratio = max(
-                    0,
-                    min(
-                        (
-                            num / (2 * n.token0Amt * n.token1Amt)
-                            if n.token0Amt and n.token1Amt
-                            else 0
-                        ),
-                        1,
-                    ),
-                )
-                amt0, amt1 = ratio * n.token0Amt, (1 - ratio) * n.token1Amt
-                self.x -= amt0
-                self.y -= amt1
-                self.k_last = math.sqrt(self.x * self.y)
-                self.x, self.y = self.rebalance(price)
-                paid.append((n, amt0, amt1))
-                del self.notes[nid]
-        return paid
-
-    def reverse_deposit(
-        self,
-        in0: float,
-        in1: float,
-        lock_days: int,
-        today: float,
-        option_type: str,
-        price: float,
-    ) -> tuple:
-        assert option_type in ["call", "put"]
-        
-        if option_type == "put":
-            assert in1 == 0, "For put options, in1 must be zero"
-        elif option_type == "call":
-            assert in0 == 0, "For call options, in0 must be zero"
-            
-        nid, note0, note1, note0_with_prem, note1_with_prem, prem_ratio, due, duration_sec, q_old, q_new, k_after = (
-            self._process_deposit(
-                in0,
-                in1,
-                lock_days,
-                today,
-                price,
-                deposit_type=DepositType.REVERSE,
-                option_type=option_type,
+        n = self.notes_forward[nid]
+        amount0 = n.note0_with_premium
+        amount1 = n.note1_with_premium
+        if n.due <= today:
+            num = self.x * amount1 + amount0 * amount1 - self.y * amount0
+            ratio = max(
+                0,
+                min(
+                    (num / (2 * amount0 * amount1) if amount0 and amount1 else 0),
+                    1,
+                ),
             )
+            withdraw0, withdraw1 = ratio * amount0, (1 - ratio) * amount1
+            self.x -= withdraw0
+            self.y -= withdraw1
+            self.k_last = math.sqrt(self.x * self.y)
+            del self.notes_forward[nid]
+            return (n, withdraw0, withdraw1)
+
+    def reverse_deposit(self, m: float, n: float, lock_days: int, price: float) -> tuple:
+        """Handle reverse dual deposit with immediate exercise"""
+        assert m >= 0 and n >= 0, "m and n must be non-negative"
+        due, duration_sec = compute_due_time_and_duration(lock_days)
+
+        k_before = math.sqrt(self.x * self.y)
+        k_after = math.sqrt((self.x + m) * (self.y + n))
+        diff = k_after - k_before
+        Q_sq = 4 * diff * diff
+        q_add = math.sqrt(Q_sq) / 2
+
+        q_old = self.q_by_due[due]
+        q_new = q_old - q_add
+        if q_new < 0:
+            raise ValueError("Insufficient liquidity for reverse deposit")
+        a, b = q_old / self.w, q_new / self.w
+
+        discount = self._calculate_discount(a, b, DepositType.REVERSE)
+        prem_ratio = (
+            0.4 * self.basis * math.sqrt(duration_sec / (365 * 86400)) * discount
         )
 
-        # The swap_amount
-        if option_type == "put":
-            swap_amount = note1
-            if self.y < swap_amount:
-                raise ValueError("Insufficient pool reserves")
-            self.x += note0_with_prem
-            self.y -= swap_amount
-        elif option_type == "call":
-            swap_amount = note0
-            if self.x < swap_amount:
-                raise ValueError("Insufficient pool reserves")
-            self.x -= swap_amount
-            self.y += note1_with_prem
+        strike, delta_x, delta_y = (
+            self._calculate_reverse_deposit(m, n, prem_ratio)
+        )
 
+        nid = next(self._seq)
+        # Update reserves
+        self.x += delta_x
+        self.y += delta_y
         self.k_last = math.sqrt(self.x * self.y)
-        return nid, note0, note1, note0_with_prem, note1_with_prem, prem_ratio, due, duration_sec, q_old, q_new
 
-    def exercise_option(self, nid: int, utc_date, price: float):
-        today = utc_date.timestamp() / 86400
-        n = self.notes.get(nid)
-        if not n or n.option_type not in ["call", "put"] or n.due <= today:
-            raise ValueError("Invalid note, not a reverse option, or already expired")
+        # Store note with revert options
+        self.notes_reverse[nid] = Note_reverse(
+            nid, m, n, strike, due
+        )
 
-        if n.option_type == "put":
-            if self.y < n.token1Amt or self.x < n.token0Amt:
-                raise ValueError("Insufficient pool reserves")
-            self.y += n.token1Amt
-            self.x -= n.token0Amt
-        elif n.option_type == "call":
-            if self.x < n.token0Amt or self.y < n.token1Amt:
-                raise ValueError("Insufficient pool reserves")
-            self.x += n.token0Amt
-            self.y -= n.token1Amt
+        return (
+            nid,
+            m,
+            n,
+            strike,
+            delta_x,
+            delta_y,
+            prem_ratio,
+            due,
+            duration_sec,
+            q_old,
+            q_new,
+        )
 
+    def exercise_option(self, nid: int, option_type: str) -> tuple:
+        """Revert exercise option for reverse deposit based on specified option type"""
+        note = self.notes_reverse.get(nid)
+        if not note or not isinstance(note, Note_reverse):
+            raise ValueError("Invalid note or not a reverse deposit")
+
+        if option_type not in ["put", "call"]:
+            raise ValueError("Invalid option type, use 'put' or 'call'")
+
+        strike = note.strike
+        m = note.m  
+        n = note.n  
+        if option_type == "call":
+            swap_in, swap_out = (m * strike, m)  # (swap in token1, swap out token0)
+            if self.x < swap_out:
+                raise ValueError("Insufficient pool reserves for put revert")
+            self.y += swap_in  # Pool receive token1
+            self.x -= swap_out  # Pool pay token0
+
+        elif option_type == "put":
+            swap_in, swap_out = (n / strike, n) # (swap in token0, swap out token1)
+            if self.y < swap_out:
+                raise ValueError("Insufficient pool reserves for call revert")
+            self.x += swap_in  # Pool receive token0
+            self.y -= swap_out  # Pool pay token1
         self.k_last = math.sqrt(self.x * self.y)
-        del self.notes[nid]
+        del self.notes_reverse[nid]
+
+        return (
+            option_type,
+            swap_in,
+            swap_out,
+        )
 
     def snapshot(self, day: float, price: float) -> dict:
         return {
@@ -254,19 +238,6 @@ class DysonPool:
             "price": price,
             "reserve_eth": self.x,
             "reserve_usdc": self.y,
+            "pool_eth_price": self.y / self.x,
             "k": self.k_last,
         }
-
-    def virtual_swap(self, input_amount: float, is_input_0: bool = True) -> float:
-        """Calculate virtual swap output based on constant product formula (xy = k)"""
-        assert self.x > 0 and self.y > 0, "Pool reserves must be positive"
-        assert input_amount > 0, "Input amount must be positive"
-
-        if is_input_0:
-            numerator = self.y * input_amount
-            denominator = self.x + input_amount
-            return numerator / denominator
-        else:
-            numerator = self.x * input_amount
-            denominator = self.y + input_amount
-            return numerator / denominator
