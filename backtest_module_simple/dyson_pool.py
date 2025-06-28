@@ -21,9 +21,6 @@ class Note_reverse:
     delta_y: float  # If positive, means user swap in token1 amount; if negative, means user receive token1 amount
     strike: float  # Strike price
     price_in: float  # Price at deposit
-    revert_put: tuple[float, float] = (0, 0)  # (put swap in, put swap out)
-    revert_call: tuple[float, float] = (0, 0)  # (call swap in, call swap out)
-
 
 class DysonPool:
     def __init__(
@@ -72,10 +69,7 @@ class DysonPool:
         strike = (self.y + n) / (self.x + m) 
         delta_x = m - n / strike 
         delta_y = n - m * strike
-        # Revert options
-        revert_put = (m * strike, m)  # (swap in token1, swap out token0)
-        revert_call = (n / strike, n)  # (swap in token0, swap out token1)
-        return strike, delta_x, delta_y, revert_put, revert_call
+        return strike, delta_x, delta_y
 
     def deposit(self, in0: float, in1: float, price: float) -> tuple:
         """Handle forward dual deposit"""
@@ -121,7 +115,7 @@ class DysonPool:
         """Handle reverse dual deposit with immediate exercise"""
         assert m >= 0 and n >= 0, "m and n must be non-negative"
         nid = next(self._seq)
-        strike, delta_x, delta_y, revert_put, revert_call = (
+        strike, delta_x, delta_y = (
             self._calculate_reverse_deposit(m, n)
         )
 
@@ -133,11 +127,11 @@ class DysonPool:
 
         # Store note with revert options
         self.notes_reverse[nid] = Note_reverse(
-            nid, m, n, delta_x, delta_y, strike, price, revert_put, revert_call
+            nid, m, n, delta_x, delta_y, strike, price
         )
         return nid
 
-    def revert_exercise(self, nid: int, option_type: str) -> tuple:
+    def exercise_option(self, nid: int, option_type: str) -> tuple:
         """Revert exercise option for reverse deposit based on specified option type"""
         note = self.notes_reverse.get(nid)
         if not note or not isinstance(note, Note_reverse):
@@ -146,15 +140,16 @@ class DysonPool:
         if option_type not in ["put", "call"]:
             raise ValueError("Invalid option type, use 'put' or 'call'")
 
-        if option_type == "put":
-            swap_in, swap_out = note.revert_put
+        strike = note.strike
+        if option_type == "call":
+            swap_in, swap_out = (note.m * strike, note.m)  # (swap in token1, swap out token0)
             if self.x < swap_out:
                 raise ValueError("Insufficient pool reserves for put revert")
             self.y += swap_in  # Pool receive token1
             self.x -= swap_out  # Pool pay token0
 
-        elif option_type == "call":
-            swap_in, swap_out = note.revert_call
+        elif option_type == "put":
+            swap_in, swap_out = (note.n / strike, note.n)  # (swap in token0, swap out token1)
             if self.y < swap_out:
                 raise ValueError("Insufficient pool reserves for call revert")
             self.x += swap_in  # Pool receive token0
@@ -167,7 +162,7 @@ class DysonPool:
             swap_in,
             swap_out,
         )  
-        
+
     def snapshot(self, day: float, price: float) -> dict:
         return {
             "day": day,

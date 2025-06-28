@@ -2,7 +2,7 @@ import random, itertools
 import pandas as pd
 from price_loader import load_eth_prices
 from dyson_pool import DysonPool
-from time_utils import tm, random_time_in_day
+from time_utils import TimeManager
 from datetime import datetime, timezone, time
 
 class BacktestRunner:
@@ -51,7 +51,8 @@ class BacktestRunner:
         first_price = self.prices_df.price_usd.iloc[0]
         self.INIT_ETH = init_eth
         self.INIT_USDC = init_eth * first_price
-        self.pool = DysonPool(init_eth, self.INIT_USDC, basis, w_factor)
+        self.tm = TimeManager()
+        self.pool = DysonPool(init_eth, self.INIT_USDC, basis, w_factor, self.tm)
 
         # Initialize as empty DataFrames with specified columns
         self.deposits = pd.DataFrame(
@@ -218,8 +219,8 @@ class BacktestRunner:
                 forward_or_reverse = (
                     random.random() < self.hp["FORWARD_OR_REVERSE_PROB"]
                 )
-
-                tm.setCurrentTime(random_time_in_day(utc_date))
+                random_time = self.tm.random_time_in_day(utc_date)
+                self.tm.setCurrentTime(random_time)
                 lock = random.randint(1, 30)
 
                 # 3. Forward deposits
@@ -254,7 +255,7 @@ class BacktestRunner:
                             {
                                 "note_id": nid,
                                 "day": day_idx,
-                                "datetime": tm.getCurrentTime(),
+                                "datetime": self.tm.getCurrentTime(),
                                 "lock": lock,
                                 "due": due,
                                 "duration_sec": duration_sec,
@@ -316,7 +317,7 @@ class BacktestRunner:
                                 {
                                     "note_id": nid,
                                     "day_deposit": day_idx,
-                                    "datetime": tm.getCurrentTime(),
+                                    "datetime": self.tm.getCurrentTime(),
                                     "lock": lock,
                                     "duration_sec": duration_sec,
                                     "due": due,
@@ -329,7 +330,10 @@ class BacktestRunner:
                                     "revert_call": revert_call,
                                     "premium_ratio": prem_ratio,
                                     "q_old_new": (q_old, q_new),
-                                    "new_x_y": (self.pool.x, self.pool.y,)
+                                    "new_x_y": (
+                                        self.pool.x,
+                                        self.pool.y,
+                                    ),
                                 }
                             ]
                         )
@@ -347,7 +351,7 @@ class BacktestRunner:
         if day_idx % rebalance_interval == 0:
             # Rebalance pool reserves every rebalance_interval days
             self.pool.rebalance(price)
-        
+
     def run(self):
         for d, (row_idx, row) in enumerate(self.prices_df.iterrows(), start=1):
             price = row.price_usd

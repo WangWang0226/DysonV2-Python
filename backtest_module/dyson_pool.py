@@ -3,7 +3,7 @@ import math
 from dataclasses import dataclass
 from collections import defaultdict
 from enum import Enum
-from time_utils import compute_due_time_and_duration
+from time_utils import TimeManager
 
 @dataclass
 class Note_forward:
@@ -28,7 +28,7 @@ class DepositType(Enum):
 
 class DysonPool:
     def __init__(
-        self, init_eth: float, init_usdc: float, basis: float, w_factor: float
+        self, init_eth: float, init_usdc: float, basis: float, w_factor: float, tm: TimeManager
     ):
         self.x = init_eth  # ETH reserve
         self.y = init_usdc  # USDC reserve
@@ -39,6 +39,7 @@ class DysonPool:
         self.notes_forward = {}
         self.notes_reverse = {}
         self._seq = itertools.count()
+        self.tm = tm
 
     def rebalance(self, price: float) -> tuple[float, float]:
         """Rebalance pool to 50/50 asset ratio based on current price, and update internal state."""
@@ -56,7 +57,7 @@ class DysonPool:
             self.y -= diff
         # 若已經是 50/50 就不變
         return self.x, self.y  
-    
+
     def _calculate_discount(
         self, a: float, b: float, deposit_type: DepositType
     ) -> float:
@@ -97,7 +98,7 @@ class DysonPool:
     def deposit(self, in0: float, in1: float, lock_days: int, price: float) -> tuple:
         """Handle forward dual deposit"""
         assert in0 > 0 or in1 > 0, "At least one input must be positive"
-        due, duration_sec = compute_due_time_and_duration(lock_days)
+        due, duration_sec = self.tm.compute_due_time_and_duration(lock_days)
 
         k_before = math.sqrt(self.x * self.y)
         k_after = math.sqrt((self.x + in0) * (self.y + in1))
@@ -128,6 +129,7 @@ class DysonPool:
 
     def withdraw_due(self, utc_date, price: float, nid: int) -> list:
         today = utc_date.timestamp() / 86400
+
         n = self.notes_forward[nid]
         amount0 = n.note0_with_premium
         amount1 = n.note1_with_premium
@@ -146,11 +148,13 @@ class DysonPool:
             self.k_last = math.sqrt(self.x * self.y)
             del self.notes_forward[nid]
             return (n, withdraw0, withdraw1)
+        else:
+            raise ValueError("Cannot withdraw before due date")
 
     def reverse_deposit(self, m: float, n: float, lock_days: int, price: float) -> tuple:
         """Handle reverse dual deposit with immediate exercise"""
         assert m >= 0 and n >= 0, "m and n must be non-negative"
-        due, duration_sec = compute_due_time_and_duration(lock_days)
+        due, duration_sec = self.tm.compute_due_time_and_duration(lock_days)
 
         k_before = math.sqrt(self.x * self.y)
         k_after = math.sqrt((self.x + m) * (self.y + n))
