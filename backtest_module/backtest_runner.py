@@ -98,19 +98,20 @@ class BacktestRunner:
                 "due",
                 "due_idx",
                 "price_in",
-                "m_n",
+                "m",
+                "n",
                 "strike",
                 "delta_x_y",
-                "revert_put",
-                "revert_call",
+                "exercise_put",
+                "exercise_call",
                 "premium_ratio",
                 "q_old_new",
                 "new_x_y",
-                "exercise_result"
-                "day_revert_exercising",
-                "price_when_revert_exercising",
-                "swap_in_revert_exercising",
-                "swap_out_revert_exercising",
+                "exercise_result",
+                "day_exercise",
+                "price_when_exercise",
+                "swap0_exercise",
+                "swap1_exercise",
             ]
         )
 
@@ -133,6 +134,12 @@ class BacktestRunner:
 
     def _simulate_day(self, day_idx, price, utc_date: datetime, allow_deposit: bool):
 
+        def format_number(number, precision=4):
+            number = float(number)
+            # Round to the specified precision
+            rounded = round(number, precision)
+            return rounded
+
         # 1. Exercise option of Reverse deposits
         today = utc_date.timestamp() / 86400
 
@@ -147,7 +154,7 @@ class BacktestRunner:
                 if is_double_side:
                     # 雙邊存款必為一側行權，一側不行權
                     option_type = "call" if price_go_up else "put"
-                    _, swap_in, swap_out = self.pool.exercise_option(nid, option_type)
+                    amt0, amt1 = self.pool.exercise_option(nid, option_type)
 
                     self.reverse_deposits.loc[idx, "exercise_result"] = "EXERCISE_" + option_type.upper()
 
@@ -157,7 +164,7 @@ class BacktestRunner:
                         # 單邊 ETH 存款，看漲
                         if price_go_up:
                             # 行權
-                            _, swap_in, swap_out = self.pool.exercise_option(nid, "call")
+                            amt0, amt1 = self.pool.exercise_option(nid, "call")
                             self.reverse_deposits.loc[idx, "exercise_result"] = "EXERCISE_CALL"
                         else :
                             # 不行權
@@ -167,7 +174,7 @@ class BacktestRunner:
                         # 單邊 USDC 存款
                         if not price_go_up:
                             # 行權
-                            _, swap_in, swap_out = self.pool.exercise_option(nid, "put")
+                            amt0, amt1 = self.pool.exercise_option(nid, "put")
                             self.reverse_deposits.loc[idx, "exercise_result"] = "EXERCISE_PUT"
                         else:
                             # 不行權
@@ -177,14 +184,14 @@ class BacktestRunner:
                 if self.reverse_deposits.loc[idx, "exercise_result"] != "NOT_EXERCISED":
                     self.reverse_deposits.loc[idx, "day_exercise"] = day_idx
                     self.reverse_deposits.loc[idx, "price_when_exercise"] = price
-                    self.reverse_deposits.loc[idx, "swap_in_exercise"] = swap_in
-                    self.reverse_deposits.loc[idx, "swap_out_exercise"] = swap_out
+                    self.reverse_deposits.loc[idx, "swap0_exercise"] = amt0
+                    self.reverse_deposits.loc[idx, "swap1_exercise"] = amt1
 
         # 2. Forward dual investors withdraw positions
         for nid in list(self.pool.notes_forward.keys()):
             note = self.pool.notes_forward[nid]
             if note.due <= today:
-                note, amt0, amt1 = self.pool.withdraw_due(utc_date, price, nid)
+                amt0, amt1 = self.pool.withdraw(utc_date, nid)
                 idx = self.deposits.index[self.deposits["note_id"] == nid][0]
                 in0 = self.deposits.loc[idx, "in0"]
                 in1 = self.deposits.loc[idx, "in1"]
@@ -302,37 +309,45 @@ class BacktestRunner:
                             strike,
                             delta_x,
                             delta_y,
+                            exercise_call,
+                            exercise_put,
                             prem_ratio,
                             due,
                             duration_sec,
                             q_old,
                             q_new,
-                        ) = self.pool.reverse_deposit(m, n, lock, price)
-
-                        revert_put = (m * strike, m)
-                        revert_call = (n / strike, n)
+                        ) = self.pool.reverse_deposit(m, n, lock)
 
                         new_reverse_deposit = pd.DataFrame(
                             [
                                 {
                                     "note_id": nid,
                                     "day_deposit": day_idx,
-                                    "datetime": self.tm.getCurrentTime(),
+                                    "datetime": self.tm.getCurrentTime().replace(
+                                        tzinfo=None
+                                    ),
                                     "lock": lock,
                                     "duration_sec": duration_sec,
                                     "due": due,
                                     "due_idx": day_idx + lock,
                                     "price_in": price,
-                                    "m_n": (m, n),
+                                    "m": m,
+                                    "n": n,
                                     "strike": strike,
-                                    "delta_x_y": (delta_x, delta_y),
-                                    "revert_put": revert_put,
-                                    "revert_call": revert_call,
+                                    "delta_x_y": (
+                                        format_number(delta_x),
+                                        format_number(delta_y),
+                                    ),
+                                    "exercise_put": (format_number(exercise_put[0]), format_number(exercise_put[1])),
+                                    "exercise_call": (format_number(exercise_call[0]), format_number(exercise_call[1])),
                                     "premium_ratio": prem_ratio,
-                                    "q_old_new": (q_old, q_new),
+                                    "q_old_new": (
+                                        format_number(q_old),
+                                        format_number(q_new),
+                                    ),
                                     "new_x_y": (
-                                        self.pool.x,
-                                        self.pool.y,
+                                        format_number(self.pool.x),
+                                        format_number(self.pool.y),
                                     ),
                                 }
                             ]
@@ -350,7 +365,28 @@ class BacktestRunner:
         rebalance_interval = self.hp["REBALANCE_INTERVAL"]
         if day_idx % rebalance_interval == 0:
             # Rebalance pool reserves every rebalance_interval days
-            self.pool.rebalance(price)
+            new_x, new_y = self.rebalance(price, self.pool.x, self.pool.y)
+            self.pool.swap(new_x, new_y)
+
+    def rebalance(self, price: float, x: float, y: float) -> tuple[float, float]:
+        """Rebalance pool to 50/50 asset ratio based on current price, and update internal state."""
+        eth_val = x * price
+        total_val = eth_val + y
+        target = total_val / 2
+
+        if eth_val > target:
+            diff = (eth_val - target) 
+            new_x = x - diff / price
+            new_y = y + diff
+        elif y > target:
+            diff = y - target
+            new_x = x + diff / price
+            new_y = y - diff
+        else:
+            # 若已經是 50/50 就不變
+            new_x, new_y = x, y
+
+        return new_x, new_y
 
     def run(self):
         for d, (row_idx, row) in enumerate(self.prices_df.iterrows(), start=1):

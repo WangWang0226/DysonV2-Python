@@ -30,10 +30,6 @@ class Analyzer:
             {True: "Single", False: "Dual"}
         )
 
-        self.reverse_dep[["m", "n"]] = pd.DataFrame(
-            self.reverse_dep["m_n"].tolist(), index=self.reverse_dep.index
-        )
-
         # Create reverse_user_pnl_df
         self.reverse_user_pnl_df = self._create_reverse_user_pnl_df()
 
